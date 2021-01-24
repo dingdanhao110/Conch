@@ -1136,6 +1136,6 @@ if __name__ == '__main__':
     #gen_homograph()
     # dump_edge_emb(emb_len=128)
     #gen_homoadj()
-    #gen_walk(path='../data/dblp2/')
-    gen_edge_adj(K=5,path='../data/dblp2/', edge_dim=130)
+    gen_walk(path='../data/dblp2/')
+    # gen_edge_adj(K=5,path='../data/dblp2/', edge_dim=130)
     # gen_edge_sim_adj(path='../data/dblp2/', K=10,edge_dim=18,sim='cos')

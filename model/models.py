@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from model.layers import BaseConch,BaseConchNc,BaseConchRd, AvgReadout, Discriminator
+from model.layers import BaseConch,BaseConchNc,BaseConchRd, AvgReadout, Discriminator, BaseConchGS, CLING_HAN
 
 class conch_dgi(nn.Module):
     def __init__(self, n_mp,
@@ -158,10 +158,186 @@ class conch_dgi2(nn.Module):
 
         reg = self.disc(c, h_1, h_2, samp_bias1, samp_bias2)
 
-        return preds, weights, reg
+        return preds, None, reg
     
     def get_embed(self, feat1):
         h_1 = self.gcn(feat1)
+        output, _ = self.mp_agg(h_1)
+        output = self.fc(output)
+
+        return output
+
+
+
+class conch_dgi_gs(nn.Module):
+    def __init__(self, n_mp,
+                 problem,
+                 prep_len,
+                 n_head,
+                 node_layer_specs,
+                 edge_layer_specs,
+                 aggregator_class,
+                 mpaggr_class,
+                 edge_aggr_class,
+                 prep_class,
+                 sampler_class,
+                 dropout,
+                 batchnorm,
+                 shuffle=False,
+                 attn_dropout=0,
+                 bias=False,):
+        super(conch_dgi_gs, self).__init__()
+        self.dropout = dropout
+        self.shuffle = shuffle
+        self.gcn = BaseConchGS(
+                 n_mp,
+                 problem,
+                 prep_len,
+                 n_head,
+                 node_layer_specs,
+                 edge_layer_specs,
+                 aggregator_class,
+                 mpaggr_class,
+                 edge_aggr_class,
+                 prep_class,
+                 sampler_class,
+                 dropout,
+                 batchnorm,
+                 attn_dropout,
+                 bias)
+
+        self.read = AvgReadout()
+
+        self.sigm = nn.Sigmoid()
+
+        
+        
+        self.mp_agg = mpaggr_class(
+            self.gcn.output_dim, n_head=n_mp + int(bias), dropout=dropout, batchnorm=batchnorm, )
+        
+        self.disc = Discriminator(self.mp_agg.output_dim)
+        
+        self.fc = nn.Sequential(*[
+            # nn.Linear(self.mp_agg.output_dim, 32, bias=True),
+            # nn.ReLU(), nn.Dropout(self.dropout),
+            # nn.Linear(32, problem.n_classes, bias=True),
+
+            nn.Linear(self.mp_agg.output_dim, problem.n_classes, bias=True),
+        ])
+
+    def forward(self, ids, feat1, feat2, msk, samp_bias1, samp_bias2, get_embed=None):
+        
+        h_1 = self.gcn(ids,feat1,shuffle=False)
+        
+        # h_1 = F.normalize(h_1, dim=2) #normalize before attention
+        h_1, weights = self.mp_agg(h_1)
+        output = self.fc(h_1)
+        preds = F.dropout(output, self.dropout, training=self.training)
+        if get_embed=='embed':
+            return h_1
+        if get_embed=='pred':
+            return output
+
+        c = self.read(h_1, msk)
+        c = self.sigm(c)
+
+        h_2 = self.gcn(ids,feat2, shuffle=self.shuffle)
+        h_2, _ = self.mp_agg(h_2)
+
+        reg = self.disc(c, h_1, h_2, samp_bias1, samp_bias2)
+
+        return preds, None, reg
+    
+    def get_embed(self, ids, feat1):
+        h_1 = self.gcn(ids,feat1)
+        output, _ = self.mp_agg(h_1)
+        output = self.fc(output)
+
+        return output
+
+
+
+class hdgi_gs(nn.Module):
+    def __init__(self, n_mp,
+                 problem,
+                 prep_len,
+                 n_head,
+                 node_layer_specs,
+                 edge_layer_specs,
+                 aggregator_class,
+                 mpaggr_class,
+                 edge_aggr_class,
+                 prep_class,
+                 sampler_class,
+                 dropout,
+                 batchnorm,
+                 shuffle=False,
+                 attn_dropout=0,
+                 bias=False,):
+        super(hdgi_gs, self).__init__()
+        self.dropout = dropout
+        self.shuffle = shuffle
+        self.gcn = CLING_HAN(
+                 n_mp,
+                 problem,
+                 prep_len,
+                 n_head,
+                 node_layer_specs,
+                 edge_layer_specs,
+                 aggregator_class,
+                 mpaggr_class,
+                 edge_aggr_class,
+                 prep_class,
+                 sampler_class,
+                 dropout,
+                 batchnorm,
+                 attn_dropout,
+                 bias)
+
+        self.read = AvgReadout()
+
+        self.sigm = nn.Sigmoid()
+
+        
+        
+        self.mp_agg = mpaggr_class(
+            self.gcn.output_dim, n_head=n_mp + int(bias), dropout=dropout, batchnorm=batchnorm, )
+        
+        self.disc = Discriminator(self.mp_agg.output_dim)
+        
+        self.fc = nn.Sequential(*[
+            # nn.Linear(self.mp_agg.output_dim, 32, bias=True),
+            # nn.ReLU(), nn.Dropout(self.dropout),
+            # nn.Linear(32, problem.n_classes, bias=True),
+
+            nn.Linear(self.mp_agg.output_dim, problem.n_classes, bias=True),
+        ])
+
+    def forward(self, ids, feat1, feat2, msk, samp_bias1, samp_bias2, get_embed=None):
+        
+        h_1 = self.gcn(ids,feat1)
+        
+        # h_1 = F.normalize(h_1, dim=2) #normalize before attention
+        h_1, weights = self.mp_agg(h_1)
+        output = self.fc(h_1)
+        preds = F.dropout(output, self.dropout, training=self.training)
+        if get_embed=='embed':
+            return h_1
+        if get_embed=='pred':
+            return output
+
+        c = self.read(h_1, msk)
+        c = self.sigm(c)
+
+        h_2 = self.gcn(ids,feat2)
+        h_2, _ = self.mp_agg(h_2)
+
+        reg = self.disc(c, h_1, h_2, samp_bias1, samp_bias2)
+
+        return preds, None, reg
+    
+    def get_embed(self, ids, feat1):
+        h_1 = self.gcn(ids,feat1)
         output, _ = self.mp_agg(h_1)
         output = self.fc(output)
 

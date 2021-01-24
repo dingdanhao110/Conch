@@ -121,7 +121,7 @@ class BaseConch(nn.Module):
         for i, key in enumerate(problem.edge_embs):
             self.register_buffer('edge_emb_{}'.format(i),
                                  problem.edge_embs[key])
-            print(problem.edge_embs[key].shape)
+            # print(problem.edge_embs[key].shape)
 
         # # self.edge2node_idx_mp
         # for i, key in enumerate(problem.edge2node_idxs):
@@ -145,6 +145,7 @@ class BaseConch(nn.Module):
         self.train_batch = 999999
 
         # features = torch.FloatTensor(features[:problem.n_nodes,:])
+        print("feat dim: {}, prep_len: {}".format(problem.feats_dim,prep_len))
         self.prep = prep_class(input_dim=problem.feats_dim, n_nodes=problem.n_nodes,
                                embedding_dim=prep_len,
                                # pre_trained=features,
@@ -211,13 +212,14 @@ class BaseConch(nn.Module):
         has_feats = feats is not None
         
         output = []
-        all_ids = torch.arange(self.n_nodes).cuda()#,device=self.edge_emb_0.device
+        all_ids = torch.arange(self.n_nodes,device=self.edge_emb_0.device)#.cuda()#
+        # print(all_ids.device, feats.device)
 
         for mp in range(self.n_mp):
             if shuffle:
-                edge_perm = torch.randperm(getattr(self, 'edge_emb_{}'.format(mp)).shape[0]).cuda()#,device=self.edge_emb_0.device
+                edge_perm = torch.randperm(getattr(self, 'edge_emb_{}'.format(mp)).shape[0],device=self.edge_emb_0.device)#.cuda()#
             else:
-                edge_perm = torch.arange(getattr(self, 'edge_emb_{}'.format(mp)).shape[0]).cuda()#,device=self.edge_emb_0.device
+                edge_perm = torch.arange(getattr(self, 'edge_emb_{}'.format(mp)).shape[0],device=self.edge_emb_0.device)#.cuda()#
 
             # import GPUtil
             # GPUtil.showUtilization()
@@ -237,7 +239,9 @@ class BaseConch(nn.Module):
             for layer_idx in range(self.depth):
                 # ---Update edges---
                 tmp_edges = []
-                edge_ids = torch.arange(all_edges.shape[0]).cuda()#,device=self.edge_emb_0.device)
+                # print(all_edges.shape)
+
+                edge_ids = torch.arange(all_edges.shape[0],device=self.edge_emb_0.device) #.cuda()
                 for chunk_id, chunk in enumerate(torch.split(edge_ids, self.train_batch, dim=0)):
                     chunk_feat = all_edges[chunk]
                     neigh_feat = None
@@ -816,6 +820,259 @@ class BaseConchRd(nn.Module):
         return output
 
 
+class BaseConchGS(nn.Module):
+    """
+    No more samplers.
+    Node feature: [N,d]
+    Node neighbors: [N,S]
+    Edge embedding: [E,e]
+    Node edge mapping: [N,S]->E
+    Edge neighbors: [E,2S]
+    """
+
+    def __init__(self,
+                 n_mp,
+                 problem,
+                 prep_len,
+                 n_head,
+                 node_layer_specs,
+                 edge_layer_specs,
+                 aggregator_class,
+                 mpaggr_class,
+                 edge_aggr_class,
+                 prep_class,
+                 sampler_class,
+                 dropout,
+                 batchnorm,
+                 attn_dropout=0,
+                 bias=False,
+                 ):
+
+        super(BaseConchGS, self).__init__()
+
+        # --
+        # Input Data
+        self.edge_dim = problem.edge_dim
+        self.input_dim = problem.feats_dim
+        self.n_nodes = problem.n_nodes
+        self.n_classes = problem.n_classes
+        self.n_head = n_head
+        self.bias = bias
+
+        # feat is dynamically inputted 
+        # # self.feats
+        # self.register_buffer('feats', problem.feats)
+
+        # self.edge_neigh_mp
+        # for i, key in enumerate(problem.edge_neighs):
+        #     self.register_buffer('edge_neigh_{}'.format(i),
+        #                          problem.edge_neighs[key])
+
+        # # self.node_neigh_mp
+        # for i, key in enumerate(problem.node_neighs):
+        #     self.register_buffer('node_neigh_{}'.format(i),
+        #                          problem.node_neighs[key])
+
+        # self.node2edge_idx_mp
+        for i, key in enumerate(problem.node2edge_idxs):
+            self.register_buffer('node2edge_idx_{}'.format(i),
+                                 problem.node2edge_idxs[key])
+
+        # self.edge_emb_mp
+        for i, key in enumerate(problem.edge_embs):
+            self.register_buffer('edge_emb_{}'.format(i),
+                                 problem.edge_embs[key])
+            # print(problem.edge_embs[key].shape)
+
+        # # self.edge2node_idx_mp
+        # for i, key in enumerate(problem.edge2node_idxs):
+        #     self.register_buffer('edge2node_idx_{}'.format(i),
+        #                          problem.edge2node_idxs[key])
+
+        # self.edge_node_adj_mp
+        for i, key in enumerate(problem.edge_node_adjs):
+            self.register_buffer('edge_node_adj_{}'.format(i),
+                                 problem.edge_node_adjs[key])
+
+        # Define network
+        self.n_mp = n_mp
+        self.depth = len(node_layer_specs)
+        self.dropout = dropout
+        self.attn_dropout = attn_dropout
+        self.batchnorm = batchnorm
+
+        # features = torch.FloatTensor(features[:problem.n_nodes,:])
+        print("feat dim: {}, prep_len: {}".format(problem.feats_dim,prep_len))
+        self.prep = prep_class(input_dim=problem.feats_dim, n_nodes=problem.n_nodes,
+                               embedding_dim=prep_len,
+                               # pre_trained=features,
+                               # output_dim=prep_len
+                               )
+        self.edge_prep = nn.ModuleList([nn.Linear(problem.edge_dim, prep_len, bias=False) for _ in range(self.n_mp)])
+        self.input_dim = self.prep.output_dim
+
+        # Network
+        for mp in range(self.n_mp):
+            # agg_layers = []
+            # edge_layers = []
+            input_dim = self.input_dim
+            out_dim = 0
+            for i in range(len(node_layer_specs)):
+                node_spec = node_layer_specs[i]
+                edge_spec = edge_layer_specs[i]
+                
+                edge_agg = nn.ModuleList([edge_aggr_class(
+                    input_dim=input_dim,
+                    edge_dim=input_dim,
+                    activation=edge_spec['activation'],
+                    output_dim=edge_spec['output_dim'],
+                    concat_node=edge_spec['concat_node'],
+                    concat_edge=edge_spec['concat_edge'],
+                    dropout=self.dropout,
+                    attn_dropout=self.attn_dropout,
+                    batchnorm=self.batchnorm,
+                ) for _ in range(n_head)])
+                node_agg = nn.ModuleList([aggregator_class(
+                    input_dim=input_dim,
+                    edge_dim=edge_spec['output_dim'],
+                    output_dim=node_spec['output_dim'],
+                    activation=node_spec['activation'],
+                    concat_node=node_spec['concat_node'],
+                    concat_edge=node_spec['concat_edge'],
+                    dropout=self.dropout,
+                    attn_dropout=self.attn_dropout,
+                    batchnorm=self.batchnorm,
+                ) for _ in range(n_head)])
+                # agg_layers.append(agg)
+                # May not be the same as spec['output_dim']
+                input_dim = node_agg[0].output_dim * n_head
+                out_dim += input_dim
+
+                # edge_layers.append(edge)
+                self.add_module('node_agg_{}_{}'.format(mp, i), node_agg)
+                self.add_module('edge_agg_{}_{}'.format(mp, i), edge_agg)
+
+        self.output_dim = out_dim 
+
+    # feats correponds to all nodes; not prep()ed
+    def forward(self, ids, feats, shuffle=False):
+
+        ids.to(feats.device)
+        # has_feats = feats is not None
+        
+        output = []
+        # all_ids = torch.arange(self.n_nodes,device=self.edge_emb_0.device)#.cuda()#
+        # print(all_ids.device, feats.device)
+        
+
+        for mp in range(self.n_mp):
+            if shuffle:
+                edge_perm = torch.randperm(getattr(self, 'edge_emb_{}'.format(mp)).shape[0],device=self.edge_emb_0.device)#.cuda()#
+            else:
+                edge_perm = torch.arange(getattr(self, 'edge_emb_{}'.format(mp)).shape[0],device=self.edge_emb_0.device)#.cuda()#
+
+            tmp_ids = ids
+            
+            edge_emb = self.edge_prep[mp](getattr(self, 'edge_emb_{}'.format(mp)))[edge_perm]
+            # print(all_edges.shape)
+            # node_neigh = getattr(self, 'node_neigh_{}'.format(mp))  # row: neighbors of a node
+            node2edge_idx = getattr(self, 'node2edge_idx_{}'.format(
+                mp)) # entries: index of edge embedding, correspondding to node_neigh
+            # edge_neigh = getattr(self, 'edge_neigh_{}'.format(mp))  # row: neighbors of a edge
+            # edge2node_idx = getattr(self, 'edge2node_idx_{}'.format(mp))
+            edge_node_adj = getattr(self, 'edge_node_adj_{}'.format(mp))
+
+            # all_feats = feats[tmp_ids] if has_feats else None
+            # dummy_feats = self.prep(tmp_ids, all_feats, layer_idx=0)
+            all_feats = [self.prep(tmp_ids, feats[tmp_ids], layer_idx=0)]
+            # all_feats = [feats[tmp_ids]]
+
+            # ===============Sampling!!!!====================
+
+            for layer_idx in range(self.depth):
+                if layer_idx % 2 ==0:
+                    # node->edge
+                    # next_adj = node2edge_idx
+                    tmp_ids = node2edge_idx[tmp_ids].contiguous().view(-1)
+                    next_feat = edge_emb[tmp_ids]
+                    all_feats.append(next_feat)
+                else:
+                    # edge->node
+                    # next_adj = edge_node_adj
+                    tmp_ids = edge_node_adj[tmp_ids].contiguous().view(-1)
+                    next_feat = self.prep(tmp_ids, feats[tmp_ids], layer_idx=layer_idx+1)
+                    all_feats.append(next_feat)  # or else; .view(-1,all_feats.shape[1])
+                # k = next_adj.shape[1]
+                # print(tmp_ids.shape)
+
+            # ================End of Sampling ==================
+
+            skip_buffer = []
+            for layer_idx in range(self.depth):
+                
+                all_feats = [ getattr(self, 'node_agg_{}_{}'.format(mp, layer_idx))[0] \
+                                                  (all_feats[k], all_feats[k + 1],
+                                                   None, mask=None)\
+                              if k%2==0 else \
+                          getattr(self, 'edge_agg_{}_{}'.format(mp, layer_idx))[0] \
+                                                  (all_feats[k], all_feats[k + 1], None, mask=None)
+                          for k in range(len(all_feats)-1) ]
+                all_feats = [
+                    F.dropout(i, self.dropout, training=self.training) for i in all_feats]
+                skip_buffer.append(all_feats[0])
+            assert len(all_feats) == 1, "len(all_feats) != 1"
+                # # ---Update edges---
+                # tmp_edges = []
+                # # print(all_edges.shape)
+
+                # edge_ids = torch.arange(all_edges.shape[0],device=self.edge_emb_0.device) #.cuda()
+                # for chunk_id, chunk in enumerate(torch.split(edge_ids, self.train_batch, dim=0)):
+                #     chunk_feat = all_edges[chunk]
+                #     neigh_feat = None
+                #     chunk_node = all_feats[edge_node_adj[chunk]].view(-1,all_feats.shape[1])
+
+                #     chunk_result = torch.cat([getattr(self, 'edge_agg_{}_{}'.format(mp, layer_idx))[h] \
+                #                                   (chunk_feat, chunk_node, neigh_feat, mask=None) \
+                #                               for h in range(self.n_head)], dim=1)
+                #     chunk_result = F.dropout(chunk_result, self.dropout, training=self.training)
+                #     # del neigh_feat
+                #     # del chunk_node
+                #     # del chunk_feat
+                #     tmp_edges.append(chunk_result)
+                #     # del chunk_result
+                # next_edges = torch.cat(tmp_edges, dim=0)
+                # # ---Update nodes---
+                # # Split all_ids into batches, in case of OOM.
+                # tmp_feats = []
+                # for chunk_id, chunk in enumerate(torch.split(all_ids, self.train_batch, dim=0)):
+                #     chunk_feat = all_feats[chunk] if layer_idx != 0 else dummy_feats[chunk]
+                #     neigh_feat = None
+                #     chunk_edge = all_edges[node2edge_idx[chunk]].view(-1,all_edges.shape[1])
+
+                #     chunk_result = torch.cat([getattr(self, 'node_agg_{}_{}'.format(mp, layer_idx))[h] \
+                #                                   (chunk_feat, chunk_edge,
+                #                                    neigh_feat, mask=None) \
+                #                               for h in range(self.n_head)], dim=1)
+                #     chunk_result = F.dropout(chunk_result, self.dropout, training=self.training)
+                #     # del neigh_feat
+                #     # del chunk_edge
+                #     # del chunk_feat
+                #     tmp_feats.append(chunk_result)
+                #     # del chunk_result
+                #     pass
+                # next_feats = torch.cat(tmp_feats, dim=0)
+                # skip_buffer.append(next_feats)
+                # all_feats = next_feats
+                # all_edges = next_edges
+
+            # Jumping connections
+            output.append(torch.cat(skip_buffer, dim=-1).unsqueeze(
+                0))  # concat skip connections; unsqueeze for metapath aggr.
+
+        output = torch.cat(output, dim=0)
+        
+        return output
+
 # Applies an average on seq, of shape (Batch, nodes, features) or (Node, Feat)
 # While taking into account the masking of msk
 class AvgReadout(nn.Module):
@@ -828,3 +1085,145 @@ class AvgReadout(nn.Module):
         else:
             msk = torch.unsqueeze(msk, -1)
             return torch.sum(seq * msk, 1) / torch.sum(msk)
+
+
+class CLING_HAN(nn.Module):
+    def __init__(self,
+                 n_mp,
+                 problem,
+                 prep_len,
+                 n_head,
+                 layer_specs,
+                 edge_layer_specs,
+                 aggregator_class,
+                 mpaggr_class,
+                 edgeupt_class,
+                 prep_class,
+                 sampler_class,
+                 dropout,
+                 batchnorm,
+                 attn_dropout=0,
+                 bias=False,
+                 ):
+
+        super(CLING_HAN, self).__init__()
+
+        # --
+        # Input Data
+        # self.edge_dim = problem.edge_dim
+        self.input_dim = problem.feats_dim
+        self.n_nodes = problem.n_nodes
+        self.n_classes = problem.n_classes
+        self.n_head = n_head
+
+        # self.feats
+        # self.register_buffer('feats', problem.feats)
+
+        for i, key in enumerate(problem.node_neighs):
+            self.register_buffer('adjs_{}'.format(i), problem.node_neighs[key])
+
+        # Define network
+        self.n_mp = n_mp
+        self.depth = len(layer_specs)
+        self.dropout = dropout
+        self.attn_dropout = attn_dropout
+        self.batchnorm = batchnorm
+        self.concat_node = False
+        self.input_dropout = 0
+
+        # Sampler
+        self.train_sampler = sampler_class()
+        self.val_sampler = sampler_class()
+        self.train_sample_fns = [partial(
+            self.train_sampler, n_samples=s['n_train_samples']) for s in layer_specs]
+        self.val_sample_fns = [
+            partial(self.val_sampler, n_samples=s['n_val_samples']) for s in layer_specs]
+
+        # Prep
+        self.prep = prep_class(input_dim=problem.feats_dim, n_nodes=problem.n_nodes,
+                               embedding_dim=prep_len,
+                               )
+        self.input_dim = self.prep.output_dim
+
+        # Network
+        for mp in range(self.n_mp):
+            # agg_layers = []
+            # edge_layers = []
+            input_dim = self.input_dim
+            out_dim = 0
+            for i, spec in enumerate(layer_specs):
+                agg = nn.ModuleList([aggregator_class(
+                    input_dim=input_dim,
+                    edge_dim=None,
+                    output_dim=spec['output_dim'],
+                    activation=spec['activation'],
+                    concat_node=spec['concat_node'],
+                    concat_edge=spec['concat_edge'],
+                    dropout=self.dropout,
+                    attn_dropout=self.attn_dropout,
+                    batchnorm=self.batchnorm,
+                    hidden_dim=128,
+                ) for _ in range(n_head)])
+                # agg_layers.append(agg)
+                # May not be the same as spec['output_dim']
+                input_dim = agg[0].output_dim * n_head
+                out_dim = input_dim
+
+                # edge_layers.append(edge)
+                self.add_module('agg_{}_{}'.format(mp, i), agg)
+        self.output_dim = out_dim
+
+
+    # We only forward IDs to facilitate nn.DataParallelism
+    def forward(self, ids, feats, train=True):
+
+        # Sample neighbors
+        sample_fns = self.train_sample_fns if train else self.val_sample_fns
+
+        has_feats = feats is not None
+
+        output = []
+        tmp_ids = ids
+        tmp_feats = feats[ids] if has_feats else None
+        init_feats = torch.nn.functional.dropout( self.prep(ids, tmp_feats, layer_idx=0),self.input_dropout,training=train)
+            
+        for mp in range(self.n_mp):
+            ids = tmp_ids
+            #tmp_feats = self.prep(ids, tmp_feats, layer_idx=0)
+            tmp_feats = init_feats
+            all_feats = [tmp_feats]
+            # all_edges = []
+            for layer_idx, sampler_fn in enumerate(sample_fns):
+                neigh = sampler_fn(
+                    getattr(self, 'adjs_{}'.format(mp)), ids=ids)
+                # print(neigh.shape, edges.shape)
+                # all_edges.append(getattr(self, 'edge_emb_{}'.format(mp))[
+                #                  edges.contiguous().view(-1)])
+
+                ids = neigh.contiguous().view(-1)
+                tmp_feats = feats[ids] if has_feats else None
+                all_feats.append(
+                    self.prep(ids, tmp_feats, layer_idx=layer_idx + 1))
+
+            # Sequentially apply layers, per original (little weird, IMO)
+            # Each iteration reduces length of array by one
+            tmp_out = []
+            for i in range(self.depth):
+                # all_edges = all_edges
+
+                all_feats = [torch.cat([getattr(self, 'agg_{}_{}'.format(mp, i))[h](
+                    all_feats[k], all_feats[k + 1],
+                    None, mask=None) for h in range(self.n_head)], dim=1)
+                    for k in range(len(all_feats) - 1)]
+                all_feats = [
+                    F.dropout(i, self.dropout, training=self.training) for i in all_feats]
+
+                tmp_out.append(all_feats[0])
+            assert len(all_feats) == 1, "len(all_feats) != 1"
+            if self.concat_node:
+                output.append(torch.cat(tmp_out, dim=-1).unsqueeze(0))
+            else:
+                output.append(tmp_out[-1].unsqueeze(0))
+        output = torch.cat(output)
+
+        return output

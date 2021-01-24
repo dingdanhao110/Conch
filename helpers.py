@@ -132,6 +132,51 @@ def read_mpindex_dblp(path="./data/dblp2/",train_per=0.1):
     return features, labels, folds
 
 
+def read_mpindex_aminer(path="./data/aminer/",train_per=0.1):
+    print(train_per)
+    label_file = "label"
+    PA_file = "PA"
+    PC_file = "PC"
+    feat_emb_file = 'paper_fea.npy'
+    feat_emb = np.load("{}{}".format(path, feat_emb_file))
+    # print("{}{}.txt".format(path, PA_file))
+    PA = np.genfromtxt("{}{}.txt".format(path, PA_file),
+                       dtype=np.int32)
+    PC = np.genfromtxt("{}{}.txt".format(path, PC_file),
+                       dtype=np.int32)
+
+    paper_max = max(PA[:, 0]) + 1 #416554
+    author_max = max(PA[:, 1]) + 1
+
+    # PA_s = sp.coo_matrix((np.ones(PA.shape[0]), (PA[:, 0], PA[:, 1])),
+    #                      shape=(paper_max, author_max),
+    #                      dtype=np.float32)
+    # PT_s = sp.coo_matrix((np.ones(PT.shape[0]), (PT[:, 0], PT[:, 1])),
+    #                      shape=(paper_max, term_max),
+    #                      dtype=np.float32)
+
+    features = feat_emb
+
+    labels_raw = np.genfromtxt("{}{}.txt".format(path, label_file),
+                               dtype=np.int32)
+    # labels_raw[:, 0] -= 1
+    # labels_raw[:, 1] -= 1
+    labels = labels_raw
+    # labels[labels_raw[:, 0]] = labels_raw[:, 1]
+
+    assert paper_max == labels_raw.shape[0]
+
+    reordered = np.random.permutation(np.arange(paper_max))
+    total_labeled = labels_raw.shape[0]
+
+    idx_train = reordered[range(int(total_labeled * train_per))]
+    idx_val = reordered[range(int(total_labeled * train_per), int(total_labeled * 0.8))]
+    idx_test = reordered[range(int(total_labeled * 0.8), total_labeled)]
+
+    folds = {'train':idx_train,'val':idx_val,'test':idx_test}
+
+    return features, labels, folds
+
 def read_mpindex_cora(path="./data/cora/",train_per=0.1):
     label_file = "paper_label"
     feat_emb_file = 'term_emb.npy'

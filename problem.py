@@ -17,7 +17,7 @@ from torch.nn import functional as F
 
 from helpers import load_edge_emb
 
-from helpers import read_mpindex_dblp,read_homograph,read_mpindex_yelp,read_mpindex_yago,read_mpindex_cora
+from helpers import read_mpindex_dblp,read_homograph,read_mpindex_yelp,read_mpindex_yago,read_mpindex_cora,read_mpindex_aminer
 
 # --
 # Helper classes
@@ -79,6 +79,7 @@ read_feat_lookup = {
     "yelp":read_mpindex_yelp,
     "yago":read_mpindex_yago,
     "cora":read_mpindex_cora,
+    "aminer":read_mpindex_aminer,
 }
 
 class NodeProblem(object):
@@ -91,29 +92,31 @@ class NodeProblem(object):
         # self.edge_neighs = dict()
         # with np.load("{}edge_neighs_{}_{}.npz".format(problem_path,K, input_edge_dims)) as data:
         #     for s in schemes:
-        # #         self.edge_neighs[s] = data[s]
-        # self.node_neighs = dict()
-        # with np.load("{}node_neighs_{}_{}.npz".format(problem_path,K, input_edge_dims)) as data:
+        #         self.edge_neighs[s] = data[s]
+        self.node_neighs = dict()
+        with np.load("{}node_neighs_{}_{}.npz".format(problem_path,K, input_edge_dims)) as data:
+            for s in schemes:
+                self.node_neighs[s] = data[s]
+        # self.node2edge_idxs = dict()
+        # with np.load("{}mp_node2edge_idxs_{}_{}.npz".format(problem_path,K, input_edge_dims)) as data:
         #     for s in schemes:
-        #         self.node_neighs[s] = data[s]
-        self.node2edge_idxs = dict()
-        with np.load("{}node2edge_idxs_{}_{}.npz".format(problem_path,K, input_edge_dims)) as data:
-            for s in schemes:
-                self.node2edge_idxs[s] = data[s]
-        self.edge_embs = dict()
-        with np.load("{}edge_embs_{}_{}.npz".format(problem_path,K, input_edge_dims)) as data:
-            for s in schemes:
-                self.edge_embs[s] = data[s]
-        # print(data[s].shape)
+        #         self.node2edge_idxs[s] = data[s]
+        #         print(data[s].shape)
+        # self.edge_embs = dict()
+        # with np.load("{}mp_edge_embs_{}_{}.npz".format(problem_path,K, input_edge_dims)) as data:
+        #     for s in schemes:
+        #         self.edge_embs[s] = data[s]
+        #     print(data[s].shape)
         # self.edge2node_idxs = dict()
-        # with np.load("{}edge2node_idxs_{}_{}.npz".format(problem_path,K, input_edge_dims)) as data:
+        # with np.load("{}mp_edge2node_idxs_{}_{}.npz".format(problem_path,K, input_edge_dims)) as data:
         #     for s in schemes:
         #         self.edge2node_idxs[s] = data[s]
 
-        self.edge_node_adjs = dict()
-        with np.load("{}edge_node_adjs_{}_{}.npz".format(problem_path, K, input_edge_dims)) as data:
-            for s in schemes:
-                self.edge_node_adjs[s] = data[s]
+        # self.edge_node_adjs = dict()
+        # with np.load("{}mp_edge_node_adjs_{}_{}.npz".format(problem_path, K, input_edge_dims)) as data:
+        #     for s in schemes:
+        #         self.edge_node_adjs[s] = data[s]
+        #         print(data[s].shape)
 
         self.task      = 'classification'
         self.n_classes = int(max(labels)+1) # !!
@@ -133,8 +136,9 @@ class NodeProblem(object):
         self.targets   = labels
 
         self.feats_dim = self.feats.shape[1] if self.feats is not None else None
-        self.edge_dim = self.edge_embs[schemes[0]].shape[1]
+        # self.edge_dim = self.edge_embs[schemes[0]].shape[1]
         self.n_nodes   = features.shape[0]
+        # print(self.n_nodes)
 
         #self.homo_adj, self.homo_feat = read_homograph(path=problem_path,problem=problem)
 
@@ -151,25 +155,26 @@ class NodeProblem(object):
         self.metric_fn = getattr(ProblemMetrics, self.task)
         
         # print('NodeProblem: loading finished')
-    
+
+
     def __to_torch(self):
         if self.feats is not None:
             self.feats = torch.FloatTensor(self.feats)
 
         # for i in self.edge_neighs:
         #      self.edge_neighs[i] = torch.from_numpy(self.edge_neighs[i]).long()
-        # for i in self.node_neighs:
-        #      self.node_neighs[i] = torch.from_numpy(self.node_neighs[i]).long()
-        for i in self.node2edge_idxs:
-            self.node2edge_idxs[i] = torch.from_numpy(self.node2edge_idxs[i]).long()
-        for i in self.edge_embs:
-            self.edge_embs[i] = torch.from_numpy(self.edge_embs[i]).float()
+        for i in self.node_neighs:
+             self.node_neighs[i] = torch.from_numpy(self.node_neighs[i]).long()
+        # for i in self.node2edge_idxs:
+        #     self.node2edge_idxs[i] = torch.from_numpy(self.node2edge_idxs[i]).long()
+        # for i in self.edge_embs:
+        #     self.edge_embs[i] = torch.from_numpy(self.edge_embs[i]).float()
             # print(self.edge_embs[i].shape)
         # for i in self.edge2node_idxs:
         #      self.edge2node_idxs[i] = torch.from_numpy(self.edge2node_idxs[i]).long()
 
-        for i in self.edge_node_adjs:
-            self.edge_node_adjs[i] = torch.from_numpy(self.edge_node_adjs[i]).long()
+        # for i in self.edge_node_adjs:
+        #     self.edge_node_adjs[i] = torch.from_numpy(self.edge_node_adjs[i]).long()
         # if not sparse.issparse(self.adj):
         # if self.device!="cpu":
         #     for i in self.edge_neighs:

@@ -211,6 +211,28 @@ class DenseMask(object):
         return neigh, edges, mask[ids]
 
 
+class ConchSamplerHAN(object):
+    """
+    ...use conch tensors as input
+    """
+
+    def __init__(self, ):
+        # self.node_neigh=node_neigh
+        # self.node2edge=node2edge
+        # self.edge_emb=edge_emb
+        pass
+
+    def __call__(self, node_neigh, ids, n_samples=16):
+
+        sel = np.random.choice(node_neigh.shape[1], (ids.shape[0] * n_samples))
+        seletected_neighs = node_neigh[
+                ids.repeat_interleave(n_samples).reshape(-1),
+                np.array(sel).reshape(-1)
+                ] 
+
+        return seletected_neighs
+
+
 # --
 # Preprocessers
 
@@ -263,7 +285,7 @@ class NodeEmbeddingPrep(nn.Module):
 
 
 class LinearPrep(nn.Module):
-    def __init__(self, input_dim, n_nodes, embedding_dim=64):
+    def __init__(self, input_dim, n_nodes, embedding_dim):
         """ adds node embedding """
         super(LinearPrep, self).__init__()
         self.fc = nn.Linear(input_dim, embedding_dim, bias=False)
@@ -271,6 +293,7 @@ class LinearPrep(nn.Module):
         self.output_dim = embedding_dim
 
     def forward(self, ids, feats, layer_idx=0):
+        # print(feats.shape)
         return self.fc(feats)
 
 
@@ -973,6 +996,61 @@ class IdEdgeAggregator(nn.Module):
         return edge_emb
 
 
+class LinearAttentionAggregator(nn.Module):
+    def __init__(self, input_dim, output_dim, edge_dim, activation, hidden_dim=32,
+                 dropout=0.5, alpha=0.8,attn_dropout=0,
+                 concat_node=True, concat_edge=True, batchnorm=False):
+        super(LinearAttentionAggregator, self).__init__()
+
+        self.att = nn.Sequential(*[
+            nn.Linear(input_dim, 1, bias=False),
+        ])
+        self.att_neib = nn.Sequential(*[
+            nn.Linear(input_dim, 1, bias=False),
+        ])
+
+        self.fc_x = nn.Linear(input_dim, output_dim, bias=False)
+        self.fc_neib = nn.Linear(input_dim, output_dim, bias=False)
+
+        self.dropout = nn.Dropout(p=dropout)
+        self.batchnorm = batchnorm
+        self.output_dim = output_dim
+        self.activation = activation
+
+        if self.batchnorm:
+            self.bn = nn.BatchNorm1d(self.output_dim)
+
+    def forward(self, x, neibs, edge_emb, mask):
+        # Compute attention weights
+        neib_att = self.att(neibs)
+        x_att = self.att(x)
+        neib_att = neib_att.view(x.size(0), -1)
+        # x_att = x_att.view(x_att.size(0), x_att.size(1), 1)
+        # ws = F.softmax(torch.bmm(neib_att, x_att).squeeze())
+
+        # ws = torch.bmm(neib_att, x_att).squeeze()
+        ws = F.leaky_relu(x_att+neib_att)
+        # ws += -9999999 * mask
+        ws = F.softmax(ws, dim=1)
+
+        # Weighted average of neighbors
+        agg_neib = neibs.view(x.size(0), -1, neibs.size(1))
+        agg_neib = torch.sum(agg_neib * ws.unsqueeze(-1), dim=1)
+
+        out = self.fc_x(x) + self.fc_neib(agg_neib)
+
+        if self.batchnorm:
+            out = self.bn(out)
+
+        out = self.dropout(out)
+
+        if self.activation:
+            out = self.activation(out)
+
+        return out
+
+
+
 class ResEdge(nn.Module):
     def __init__(self, input_dim, edge_dim, activation, dropout=0.5, batchnorm=False):
         super(ResEdge, self).__init__()
@@ -1622,6 +1700,7 @@ sampler_lookup = {
     "uniform_neighbor_sampler": UniformNeighborSampler,
     "sparse_uniform_neighbor_sampler": SpUniformNeighborSampler,
     "dense_mask": DenseMask,
+    'conch_sampler': ConchSamplerHAN,
 }
 
 prep_lookup = {
@@ -1641,6 +1720,7 @@ aggregator_lookup = {
     "dense_attention": DenseAttentionAggregator,
     "dense_edge": DenseEdgeAggregator,
     "edge_emb_attn": EdgeEmbAttentionAggregator,
+    "linear_attention":LinearAttentionAggregator,
     "MR": MRAggregator,
 }
 
